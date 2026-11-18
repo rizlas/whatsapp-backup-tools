@@ -1,0 +1,151 @@
+name: Docker image
+
+# Fork-only. Mirrors upstream releases as images on
+# ghcr.io/<owner>/whatsapp-backup-tools, built from the upstream release tag
+# plus the commits of this fork's docker branch (Dockerfile, local patches).
+#
+# Modes:
+#   release  daily: new upstream release vX -> image X, git tag docker-X
+#   refresh  weekly: rebuild the latest docker-* tag (fresh base image)
+#   patch    manual: current docker branch on the latest upstream release
+#            -> image X-N, git tag docker-X-N
+#
+# Scheduled runs only fire from the default branch: in the fork the default
+# branch must be "docker" (master stays an untouched upstream mirror).
+# Tags are docker-*, never v*: upstream's release.yml publishes to PyPI on v*.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+    - cron: "43 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build mode
+        type: choice
+        options:
+          - release
+          - refresh
+          - patch
+        default: release
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: docker-image
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: auanasgheps/whatsapp-backup-tools
+  IMAGE: ghcr.io/${{ github.repository_owner }}/whatsapp-backup-tools
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MODE: ${{ inputs.mode || (github.event.schedule == '43 4 * * 1' && 'refresh') || 'release' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: docker
+          fetch-depth: 0
+
+      - name: Resolve what to build
+        id: plan
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --quiet --tags origin
+
+          utag=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          ver=${utag#v}
+          git remote add upstream "https://github.com/$UPSTREAM.git"
+          git fetch --quiet upstream master "refs/tags/$utag:refs/tags/$utag"
+
+          case "$MODE" in
+            release)
+              tag=$ver
+              if git rev-parse -q --verify "refs/tags/docker-$tag" >/dev/null; then
+                echo "docker-$tag already published, nothing to do"
+                echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+              fi ;;
+            patch)
+              n=1
+              while git rev-parse -q --verify "refs/tags/docker-$ver-$n" >/dev/null; do n=$((n + 1)); done
+              tag=$ver-$n ;;
+            refresh)
+              last=$(git tag -l 'docker-*' --sort=-creatordate | head -n1)
+              if [ -z "$last" ]; then
+                echo "no docker-* tag yet, nothing to refresh"
+                echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              tag=${last#docker-}
+              git checkout --quiet "$last" ;;
+          esac
+
+          if [ "$MODE" != refresh ]; then
+            # Replay the fork's own commits (since it branched from upstream)
+            # onto the release tag; a conflict fails the run.
+            base=$(git merge-base HEAD upstream/master)
+            git rebase --onto "$utag" "$base"
+            {
+              echo "notes<<EOF"
+              echo "Image \`$IMAGE:$tag\`, upstream [$utag](https://github.com/$UPSTREAM/releases/tag/$utag) plus:"
+              echo
+              git log --format='- %h %s' "$utag..HEAD"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "build=true"
+            echo "tag=$tag"
+            echo "utag=$utag"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Mode $MODE: building $IMAGE:$tag from $(git rev-parse --short HEAD)"
+
+      # Upstream tests on the image's own Python (upstream CI runs 3.12 only).
+      - name: Run tests on the image base
+        if: steps.plan.outputs.build == 'true'
+        run: |
+          base=$(awk '/^FROM/ {print $2; exit}' Dockerfile)
+          docker run --rm -v "$PWD":/src:ro "$base" sh -c \
+            'cp -r /src /w && cd /w && pip install -q --root-user-action=ignore . pytest tzdata && python -m pytest -q -p no:cacheprovider tests'
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.plan.outputs.build == 'true'
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        if: steps.plan.outputs.build == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        if: steps.plan.outputs.build == 'true'
+        with:
+          context: .
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.plan.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.plan.outputs.tag }}
+            org.opencontainers.image.revision=${{ steps.plan.outputs.sha }}
+
+      - name: Tag the source and create the release
+        if: steps.plan.outputs.build == 'true' && env.MODE != 'refresh'
+        env:
+          TAG: docker-${{ steps.plan.outputs.tag }}
+          NOTES: ${{ steps.plan.outputs.notes }}
+        run: |
+          set -euo pipefail
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "refs/tags/$TAG"
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes "$NOTES"
