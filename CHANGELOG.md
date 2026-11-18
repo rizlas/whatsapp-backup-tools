@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### 📁 WhatsApp Backup Archiver (`wab-archiver`)
+
+- **Prune Missing Media (`--prune-missing`)**: Opt-in mirror mode that deletes archive copies whose source file is gone from every `--wa-root`, removes the emptied folders and drops their database rows, logging each deleted copy. Never writes to the source folders; aborts without deleting anything (exit code `2`) when a source has no `Media` folder, when output and source overlap, or when more than `--prune-max-ratio` (default 10%) of the sources are missing at once.
+
 ## [0.70]
 
 ### 📁 WhatsApp Backup Archiver (`wab-archiver`)

@@ -33,6 +33,8 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
 # link_duplicates  = true               # Hardlink duplicate media across chats instead of copying bytes to save disk space
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
+# prune_missing    = false              # Delete archived media whose source file is gone from every wa_root
+# prune_max_ratio  = 0.10               # Abort the prune if more than this share of sources is missing
 
 # --- Source: Android (Local Files & Folders) ---
 # msgstore = "msgstore.db"              # Path to msgstore.db or msgstore.db.crypt15
@@ -84,6 +86,7 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
                      -o PATH [-l PATH] [--timezone TZ] [--config PATH]
                      [--dry-run] [--limit N] [--since DATE]
                      [--link-duplicates] [-P]
+                     [--prune-missing] [--prune-max-ratio RATIO]
 ```
 
 | Argument | Required | Description |
@@ -108,6 +111,8 @@ wab-archiver archive [--wa-root PATH | --ios-backup PATH]
 | `--limit N` | No | Cap rows returned per chat type. Total rows ≤ N. Useful for test runs |
 | `--since DATE` | No | Only archive media from messages sent or received on or after this date (`YYYY-MM-DD`) |
 | `--link-duplicates` | No | Hardlink duplicate media files across chats instead of copying bytes, saving disk space. Gracefully falls back to copying if the destination filesystem does not support hardlinks (e.g. exFAT, FAT32, unsupported network shares) |
+| `--prune-missing` | No | After the run, delete archived media whose source file is no longer in any `--wa-root`, so the archive mirrors the phone. Never writes to the source folders. See [Prune Missing Media](#prune-missing-media---prune-missing) |
+| `--prune-max-ratio RATIO` | No | Safety limit for `--prune-missing`: if more than this share of archived sources is missing, nothing is deleted and the run exits with code `2` (default `0.10`) |
 | `-P`, `--preserve-deleted` | No | Preserve messages deleted on the phone ("Delete for Me"), messages revoked by sender ("Delete for Everyone"), and deleted chats from previous backup runs into `preserved_messages.db` |
 
 ### `restore`
@@ -269,6 +274,22 @@ wab-archiver archive \
 ```
 
 > 💡 Preserved messages, sender-revoked messages ("Delete for Everyone"), voice and video calls (`preserved_calls`), interactive polls, shared locations, view-once media metadata, and pre-edited message drafts are retained into `preserved_messages.db` across backup cycles. Preserved content and deleted chats are automatically surfaced in the viewer with visual badges, progressive edit disclosure, and bidirectional reply linking. The archiver logs the exact counts during execution and in the completion run summary (`Preserved: X message(s) across Y chat(s)`).
+
+#### Prune Missing Media (`--prune-missing`)
+
+By default the archive only grows: media deleted from the phone stays in `Contacts/` and `Groups/` forever. With `--prune-missing` the archiver, after a successful run, deletes the archive copies whose original file (`Media/...`) no longer exists in any `--wa-root`, so the archive mirrors the phone:
+
+```bash
+wab-archiver archive \
+  --config config.toml \
+  --prune-missing
+```
+
+> 💡 Only archive copies under `Contacts/` and `Groups/` inside `--output` are ever deleted; the `--wa-root` folders are read only. Folders left empty are removed, the database rows of pruned files are dropped (a file that reappears on the phone is archived again) and each deleted copy is logged as `PRUNED:` in `wab-archiver.log`. Contact cards (`.vcf`) are generated from the database and are never pruned. Use `--dry-run` to see what would be removed.
+>
+> ⚠️ **Safety stops.** Nothing is deleted, and the run exits with code `2`, if a `--wa-root` has no `Media` folder (unmounted or empty source), if `--output` and a `--wa-root` overlap, or if more than `--prune-max-ratio` (default 10%) of the archived sources are missing at once: a half-synced or freshly reset phone looks exactly like "everything was deleted". Raise the ratio only for a run where the deletion is intended.
+>
+> `--prune-missing` and `--preserve-deleted` answer different needs: the first removes media files, the second keeps deleted *messages* in `preserved_messages.db`. They can be combined.
 
 #### iOS — pre-extracted mode
 
