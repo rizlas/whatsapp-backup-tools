@@ -148,4 +148,5 @@ jobs:
           set -euo pipefail
           git tag -a "$TAG" -m "$TAG"
           git push origin "refs/tags/$TAG"
-          gh release create "$TAG" --verify-tag --title "$TAG" --notes "$NOTES"
+          # --repo: with an "upstream" remote, gh would default to the parent repo
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "$NOTES"
