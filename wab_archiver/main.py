@@ -35,6 +35,7 @@ from . import (
     increment_merger,
     ios_handler,
     preservation,
+    prune,
 )
 from .progress import ProgressReporter
 
@@ -1504,6 +1505,8 @@ _VALID_CONFIG_KEYS = {
     "staging",
     "link_duplicates",
     "preserve_deleted",
+    "prune_missing",
+    "prune_max_ratio",
 }
 
 _EXAMPLE_CONFIG = """\
@@ -1533,6 +1536,8 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # preserve_deleted = true               # Preserve messages/chats deleted on phone or revoked by sender across runs
 # link_duplicates  = true               # Save disk space by hardlinking duplicate media across chats
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
+# prune_missing    = false              # Delete archived media whose source file is gone from every wa_root
+# prune_max_ratio  = 0.10               # Abort the prune if more than this share of sources is missing
 
 # -----------------------------------------------------------------------------
 # Source: Android (Local Files & Folders)
@@ -1883,6 +1888,23 @@ def parse_args() -> argparse.Namespace:
         help="Preserve messages deleted or revoked on device into preserved_messages.db.",
     )
     archive_p.add_argument(
+        "--prune-missing",
+        action="store_true",
+        dest="prune_missing",
+        default=False,
+        help="After the run, delete archived media whose source file is no longer in any "
+        "--wa-root, so the archive mirrors the phone. Never touches the source folders.",
+    )
+    archive_p.add_argument(
+        "--prune-max-ratio",
+        type=float,
+        dest="prune_max_ratio",
+        default=prune.DEFAULT_MAX_RATIO,
+        metavar="RATIO",
+        help="Safety limit for --prune-missing: abort (delete nothing) if more than this "
+        "share of archived sources is missing (default: %(default)s).",
+    )
+    archive_p.add_argument(
         "-v",
         "--debug",
         "--verbose",
@@ -1984,6 +2006,14 @@ def parse_args() -> argparse.Namespace:
             archive_p.error("--wa-root and --pull-media are mutually exclusive.")
         if not args.wa_roots and not args.pull_media:
             archive_p.error("either --wa-root or --pull-media (with --staging) is required")
+
+    if getattr(args, "prune_missing", False):
+        if args.ios_backup:
+            archive_p.error(
+                "--prune-missing requires --wa-root and cannot be used with --ios-backup"
+            )
+        if not 0 <= args.prune_max_ratio <= 1:
+            archive_p.error("--prune-max-ratio must be between 0 and 1")
 
     return args
 
@@ -2531,6 +2561,7 @@ def check_dependencies(args: argparse.Namespace, logger: logging.Logger):
 def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
     """Execute a full forward archival run."""
     check_dependencies(args, logger)
+    prune_stats = None
 
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -2856,6 +2887,16 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
                         conflict_report_path, media_resolver.conflict_rows, logger
                     )
 
+            if getattr(args, "prune_missing", False):
+                prune_stats = prune.prune_missing(
+                    archive_conn,
+                    args.output,
+                    getattr(args, "wa_roots", None) or [],
+                    logger,
+                    dry_run=args.dry_run,
+                    max_ratio=args.prune_max_ratio,
+                )
+
         finally:
             archive_conn.close()
 
@@ -2909,6 +2950,15 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
 
     logger.info("")
     logger.info(f"  {'Missing source files':<20}: {stats['missing']}")
+    if prune_stats is not None:
+        if prune_stats.aborted:
+            logger.info(f"  {'Pruned':<20}: aborted by a safety check, nothing deleted")
+        else:
+            prune_label = "Would prune" if args.dry_run else "Pruned"
+            logger.info(
+                f"  {prune_label:<20}: {prune_stats.deleted} archive cop(ies) of "
+                f"{prune_stats.missing} source file(s) gone from wa_root"
+            )
 
     if dup_summary[1] > 0:
         logger.info(
@@ -2937,6 +2987,10 @@ def run_forward_mode(args: argparse.Namespace, logger: logging.Logger):
             and os.path.isfile(conflict_report_path)
         ):
             logger.info(f"  {'Conflicts report':<20}: {conflict_report_path}")
+
+    # A blocked prune is a failure for schedulers (exit code 2), not a silent skip.
+    if prune_stats is not None and prune_stats.aborted:
+        raise SystemExit(2)
 
 
 def main():
