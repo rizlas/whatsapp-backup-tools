@@ -34,6 +34,7 @@ from . import (
     backup_reader,
     increment_merger,
     ios_handler,
+    ping,
     preservation,
     prune,
 )
@@ -1507,6 +1508,7 @@ _VALID_CONFIG_KEYS = {
     "preserve_deleted",
     "prune_missing",
     "prune_max_ratio",
+    "ping_url",
 }
 
 _EXAMPLE_CONFIG = """\
@@ -1538,6 +1540,7 @@ output     = "/path/to/archive"         # Destination folder for the archive (re
 # since            = ""                 # Only archive media from messages on or after this date (YYYY-MM-DD)
 # prune_missing    = false              # Delete archived media whose source file is gone from every wa_root
 # prune_max_ratio  = 0.10               # Abort the prune if more than this share of sources is missing
+# ping_url         = ""                 # Push URL pinged with status=up/down when the run ends (e.g. Uptime Kuma)
 
 # -----------------------------------------------------------------------------
 # Source: Android (Local Files & Folders)
@@ -1894,6 +1897,14 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="After the run, delete archived media whose source file is no longer in any "
         "--wa-root, so the archive mirrors the phone. Never touches the source folders.",
+    )
+    archive_p.add_argument(
+        "--ping-url",
+        dest="ping_url",
+        default=None,
+        metavar="URL",
+        help="When the run ends, GET this URL with status=up (exit 0) or status=down and the "
+        "exit code, e.g. an Uptime Kuma push URL. Not sent on --dry-run.",
     )
     archive_p.add_argument(
         "--prune-max-ratio",
@@ -3018,7 +3029,16 @@ def main():
     if args.dry_run:
         logger.info("*** DRY RUN MODE — no files will be copied ***")
     logger.info(f"=== WhatsApp Backup Tools - Archiver v{_get_version()} started ===")
-    run_forward_mode(args, logger)
+    ping_url = getattr(args, "ping_url", None)
+    failure = None
+    try:
+        run_forward_mode(args, logger)
+    except BaseException as e:
+        failure = e
+        raise
+    finally:
+        if ping_url and not args.dry_run:
+            ping.send(ping_url, ping.exit_code(failure), logger)
 
 
 if __name__ == "__main__":
