@@ -8,7 +8,10 @@ name: Docker image
 #   release  daily: new upstream release vX -> image X, git tag docker-X
 #   refresh  weekly: rebuild the latest docker-* tag (fresh base image)
 #   patch    manual: current docker branch on the latest upstream release
-#            -> image X-N, git tag docker-X-N
+#            -> image X overwritten, git tag docker-X moved to the new source
+#
+# Image tags are always the upstream version, never fork-made numbers; the
+# docker-X git tag and its release notes say which fork commits it contains.
 #
 # Scheduled runs only fire from the default branch: in the fork the default
 # branch must be "docker" (master stays an untouched upstream mirror).
@@ -73,9 +76,7 @@ jobs:
                 echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
               fi ;;
             patch)
-              n=1
-              while git rev-parse -q --verify "refs/tags/docker-$ver-$n" >/dev/null; do n=$((n + 1)); done
-              tag=$ver-$n ;;
+              tag=$ver ;;
             refresh)
               last=$(git tag -l 'docker-*' --sort=-creatordate | head -n1)
               if [ -z "$last" ]; then
@@ -146,7 +147,13 @@ jobs:
           NOTES: ${{ steps.plan.outputs.notes }}
         run: |
           set -euo pipefail
-          git tag -a "$TAG" -m "$TAG"
-          git push origin "refs/tags/$TAG"
+          # patch moves an existing tag to the rebuilt source (-f), so the
+          # weekly refresh rebuilds what is actually published
+          git tag -fa "$TAG" -m "$TAG"
+          git push -f origin "refs/tags/$TAG"
           # --repo: with an "upstream" remote, gh would default to the parent repo
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "$NOTES"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes "$NOTES"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "$NOTES"
+          fi
